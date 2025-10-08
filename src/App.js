@@ -31,7 +31,6 @@ function App() {
               <Route path="chat" element={<Chat />} />
               <Route path="/chat/:chatId" element={<Chat />} />
               <Route path="history" element={<History />} />
-              <Route path="settings" element={<Settings />} />
             </Route>
             <Route path="*" element={<Navigate to="/login" replace />} />
           </Routes>
