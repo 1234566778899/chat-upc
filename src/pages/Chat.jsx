@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useContext } from 'react';
 import {
     Box,
     Paper,
@@ -24,22 +24,31 @@ import {
     Send as SendIcon,
     AttachFile as AttachFileIcon,
     School as SchoolIcon,
-    Person as PersonIcon,
-    AccessTime as TimeIcon,
-    Assignment as AssignmentIcon,
-    Event as EventIcon,
-    MenuBook as MenuBookIcon,
-    AccountBalance as AccountBalanceIcon,
-    Help as HelpIcon,
     MoreVert as MoreVertIcon,
     EmojiEmotions as EmojiIcon,
-    Mic as MicIcon,
     Error as ErrorIcon,
     Refresh as RefreshIcon
 } from '@mui/icons-material';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
+import {
+    getFirestore,
+    doc,
+    setDoc,
+    getDoc,
+    updateDoc,
+    serverTimestamp,
+    arrayUnion
+} from 'firebase/firestore';
+import { AuthContext } from '../contexts/AuthContextApp';
 import { CONFIG } from '../config';
 
 const Chat = () => {
+    const { chatId } = useParams();
+    const navigate = useNavigate();
+    const location = useLocation();
+    const { user } = useContext(AuthContext);
+    const firestore = getFirestore();
+
     const [messages, setMessages] = useState([
         {
             id: 1,
@@ -54,13 +63,19 @@ const Chat = () => {
     const [showSuggestions, setShowSuggestions] = useState(true);
     const [error, setError] = useState(null);
     const [serverStatus, setServerStatus] = useState('checking');
+    const [currentChatId, setCurrentChatId] = useState(null);
+    const [isLoadingChat, setIsLoadingChat] = useState(false);
+
+    // Refs
     const messagesEndRef = useRef(null);
+    const loadedChatIdRef = useRef(null);
+    const lastNewParamRef = useRef(null);
+
     const theme = useTheme();
     const isMobile = useMediaQuery(theme.breakpoints.down('md'));
 
     const API_BASE_URL = `${CONFIG.uri}/api/chat`;
 
-    // Sugerencias inteligentes
     const suggestions = [
         { text: '📅 Fechas de matrícula', query: 'fechas de matrícula 2024', color: 'primary' },
         { text: '⏰ Horarios de atención', query: 'horarios de atención', color: 'secondary' },
@@ -82,6 +97,54 @@ const Chat = () => {
         checkServerHealth();
     }, []);
 
+    // DETECTAR ?new= para resetear el chat
+    useEffect(() => {
+        const searchParams = new URLSearchParams(location.search);
+        const newParam = searchParams.get('new');
+
+        if (newParam && newParam !== lastNewParamRef.current) {
+            console.log('✅ RESETEAR CHAT - Param:', newParam);
+            console.log('Mensajes antes:', messages.length);
+
+            lastNewParamRef.current = newParam;
+            loadedChatIdRef.current = null;
+            setCurrentChatId(null);
+            setShowSuggestions(true);
+            setInputMessage('');
+            setError(null);
+            setIsTyping(false);
+
+            // FORZAR reseteo completo de mensajes
+            const newMessages = [
+                {
+                    id: Date.now(),
+                    text: '¡Hola! 👋 Soy tu asistente virtual universitario. Puedo ayudarte con información sobre trámites, horarios, cursos, fechas importantes y mucho más.',
+                    sender: 'bot',
+                    timestamp: new Date(),
+                    type: 'welcome'
+                }
+            ];
+
+            setMessages(newMessages);
+            console.log('Mensajes después:', newMessages.length);
+
+            // Limpiar URL
+            setTimeout(() => {
+                navigate('/chat', { replace: true });
+            }, 100);
+        }
+    }, [location.search, navigate]);
+
+    // Cargar chat desde History
+    useEffect(() => {
+        if (!user || !chatId) return;
+
+        if (loadedChatIdRef.current !== chatId) {
+            loadedChatIdRef.current = chatId;
+            loadChat(chatId);
+        }
+    }, [chatId, user]);
+
     const checkServerHealth = async () => {
         try {
             const response = await fetch(`${API_BASE_URL}/health`);
@@ -93,6 +156,138 @@ const Chat = () => {
         } catch (error) {
             console.error('Error checking server health:', error);
             setServerStatus('offline');
+        }
+    };
+
+    const convertTimestampToDate = (timestamp) => {
+        if (!timestamp) return new Date();
+        if (timestamp instanceof Date) return timestamp;
+        if (timestamp.toDate && typeof timestamp.toDate === 'function') return timestamp.toDate();
+        if (typeof timestamp === 'number') return new Date(timestamp);
+        if (typeof timestamp === 'string') return new Date(timestamp);
+        return new Date();
+    };
+
+    const loadChat = async (id) => {
+        setIsLoadingChat(true);
+        try {
+            const chatDocRef = doc(firestore, 'chats', id);
+            const chatDoc = await getDoc(chatDocRef);
+
+            if (chatDoc.exists()) {
+                const chatData = chatDoc.data();
+
+                if (chatData.userId !== user.uid) {
+                    setError('No tienes acceso a este chat');
+                    navigate('/chat');
+                    return;
+                }
+
+                const loadedMessages = (chatData.messages || []).map(msg => ({
+                    ...msg,
+                    timestamp: convertTimestampToDate(msg.timestamp)
+                }));
+
+                setMessages(loadedMessages);
+                setCurrentChatId(id);
+                setShowSuggestions(false);
+            } else {
+                setError('Chat no encontrado');
+                navigate('/chat');
+            }
+        } catch (error) {
+            console.error('Error loading chat:', error);
+            setError('Error al cargar el chat');
+        } finally {
+            setIsLoadingChat(false);
+        }
+    };
+
+    const createNewChat = async (firstMessage, firstResponse) => {
+        if (!user) {
+            console.error('No hay usuario autenticado');
+            return null;
+        }
+
+        try {
+            const newChatRef = doc(firestore, 'chats', `${user.uid}_${Date.now()}`);
+            const title = firstMessage.length > 50
+                ? firstMessage.substring(0, 47) + '...'
+                : firstMessage;
+
+            const now = new Date();
+
+            const welcomeMessage = {
+                id: 1,
+                text: '¡Hola! 👋 Soy tu asistente virtual universitario. Puedo ayudarte con información sobre trámites, horarios, cursos, fechas importantes y mucho más.',
+                sender: 'bot',
+                timestamp: now.getTime(),
+                type: 'welcome'
+            };
+
+            const userMessage = {
+                id: Date.now(),
+                text: firstMessage,
+                sender: 'user',
+                timestamp: now.getTime()
+            };
+
+            const botMessage = {
+                id: Date.now() + 1,
+                text: firstResponse,
+                sender: 'bot',
+                timestamp: now.getTime(),
+                fromAPI: true
+            };
+
+            const chatData = {
+                userId: user.uid,
+                title: title,
+                lastMessage: firstResponse,
+                messages: [welcomeMessage, userMessage, botMessage],
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp()
+            };
+
+            await setDoc(newChatRef, chatData);
+
+            setCurrentChatId(newChatRef.id);
+            loadedChatIdRef.current = newChatRef.id;
+
+            window.history.replaceState(null, '', `/chat/${newChatRef.id}`);
+
+            return newChatRef.id;
+        } catch (error) {
+            console.error('Error creating chat:', error);
+            setError('Error al crear el chat');
+            return null;
+        }
+    };
+
+    const updateExistingChat = async (chatId, newUserMessage, newBotMessage) => {
+        if (!user) return;
+
+        try {
+            const chatDocRef = doc(firestore, 'chats', chatId);
+
+            const userMessageToSave = {
+                ...newUserMessage,
+                timestamp: newUserMessage.timestamp.getTime()
+            };
+
+            const botMessageToSave = {
+                ...newBotMessage,
+                timestamp: newBotMessage.timestamp.getTime()
+            };
+
+            await updateDoc(chatDocRef, {
+                lastMessage: newBotMessage.text,
+                messages: arrayUnion(userMessageToSave, botMessageToSave),
+                updatedAt: serverTimestamp()
+            });
+        } catch (error) {
+            console.error('Error updating chat:', error);
+            setError('Error al guardar el mensaje');
         }
     };
 
@@ -131,6 +326,11 @@ const Chat = () => {
             return;
         }
 
+        if (!user) {
+            setError('Debes iniciar sesión para enviar mensajes');
+            return;
+        }
+
         const newMessage = {
             id: Date.now(),
             text: messageText,
@@ -157,6 +357,12 @@ const Chat = () => {
 
             setMessages(prev => [...prev, botMessage]);
             setServerStatus('online');
+
+            if (!currentChatId) {
+                await createNewChat(messageText, botResponse);
+            } else {
+                await updateExistingChat(currentChatId, newMessage, botMessage);
+            }
 
         } catch (error) {
             console.error('Error getting response:', error);
@@ -200,48 +406,25 @@ const Chat = () => {
         }
     };
 
-    // Función mejorada para formatear el texto con mejor contraste y listas mejoradas
     const formatMessageText = (text) => {
         if (!text) return '';
 
-        // Convertir texto con formato markdown avanzado
         let formattedText = text
-            // Primero convertir negritas básicas
             .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-
-            // Mejorar el resaltado de conceptos clave en listas numeradas - CORREGIDO
             .replace(/(\d+)\.\s+([^:]+):/g, '$1. <strong style="color: inherit; font-weight: 700;">$2:</strong>')
-
-            // Listas numeradas con formato mejorado y más espaciado - CORREGIDO
             .replace(/^(\d+)\.\s+(.*$)/gm, '<div style="margin: 18px 0 14px 0; padding: 16px 12px; border-left: 4px solid currentColor; background: rgba(255, 255, 255, 0.12); border-radius: 0 8px 8px 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1);"><div style="display: flex; align-items: flex-start; gap: 12px;"><span style="font-weight: 700; color: inherit; background: rgba(255, 255, 255, 0.25); padding: 6px 10px; border-radius: 6px; font-size: 0.85em; min-width: 28px; text-align: center; border: 1px solid rgba(255,255,255,0.3);">$1</span><span style="color: inherit; line-height: 1.6; flex: 1;">$2</span></div></div>')
-
-            // Listas con viñetas mejoradas - CORREGIDO
             .replace(/^•\s+(.*$)/gm, '<div style="margin: 12px 0; padding: 12px 16px 12px 36px; position: relative; color: inherit; background: rgba(255, 255, 255, 0.08); border-radius: 6px;"><span style="color: inherit; position: absolute; left: 12px; top: 12px; font-weight: bold; font-size: 1.1em;">💡</span><span style="line-height: 1.6;">$1</span></div>')
-
-            // Mejorar formato de títulos principales - CORREGIDO
             .replace(/^([A-ZÁÉÍÓÚ][^:]{3,}):(?=\s|$)/gm, '<div style="font-weight: 700; color: inherit; margin: 20px 0 12px 0; font-size: 1.15em; padding: 12px 16px; background: rgba(255, 255, 255, 0.15); border-radius: 8px; border-left: 5px solid currentColor; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">🎯 $1:</div>')
-
-            // Convertir saltos de línea dobles en párrafos - CORREGIDO
             .replace(/\n\n/g, '</p><p style="margin: 16px 0; line-height: 1.7; color: inherit;">')
-
-            // Convertir saltos de línea simples
             .replace(/\n/g, '<br/>')
-
-            // Agregar espacios después de puntos si no los hay
             .replace(/\.([A-ZÁÉÍÓÚ])/g, '. $1')
-
-            // Mejorar formato de palabras clave importantes - CORREGIDO
             .replace(/\b(objetivo|metodología|resultados|conclusiones|investigación|estudio|análisis|datos|importante|atención|nota|recomendación|limitaciones)\b/gi, '<span class="keyword-highlight">$1</span>')
-
-            // Limpiar espacios múltiples
             .replace(/\s+/g, ' ')
             .trim();
 
-        // Envolver todo en un párrafo si no tiene estructura de bloques
         if (!formattedText.includes('<div') && !formattedText.includes('<p')) {
             formattedText = `<p style="margin: 0; line-height: 1.7; color: inherit; font-weight: 500;">${formattedText}</p>`;
         } else {
-            // Si ya tiene estructura, envolver en contenedor con mejor tipografía
             formattedText = `<div style="line-height: 1.7; color: inherit; font-size: 14px; font-weight: 500;">${formattedText}</div>`;
         }
 
@@ -269,6 +452,20 @@ const Chat = () => {
         }
     };
 
+    if (isLoadingChat) {
+        return (
+            <Box sx={{
+                display: 'flex',
+                justifyContent: 'center',
+                alignItems: 'center',
+                height: '100vh',
+                bgcolor: '#f0f2f5'
+            }}>
+                <CircularProgress />
+            </Box>
+        );
+    }
+
     return (
         <Box sx={{
             height: '100%',
@@ -277,8 +474,6 @@ const Chat = () => {
             bgcolor: '#f0f2f5',
             position: 'relative'
         }}>
-
-            {/* Header del Chat */}
             <Paper
                 elevation={2}
                 sx={{
@@ -348,7 +543,6 @@ const Chat = () => {
                 </Box>
             </Paper>
 
-            {/* Área de Mensajes */}
             <Box sx={{
                 flexGrow: 1,
                 overflow: 'auto',
@@ -358,7 +552,7 @@ const Chat = () => {
                 mb: showSuggestions ? '160px' : '80px'
             }}>
                 <List sx={{ py: 0, maxWidth: 900, mx: 'auto' }}>
-                    {messages.map((message, index) => (
+                    {messages.map((message) => (
                         <ListItem
                             key={message.id}
                             sx={{
@@ -415,7 +609,6 @@ const Chat = () => {
                                             })
                                         }}
                                     >
-                                        {/* Contenido del mensaje con formato mejorado y colores corregidos */}
                                         <Box
                                             sx={{
                                                 mb: 1,
@@ -433,7 +626,6 @@ const Chat = () => {
                                                     color: 'inherit'
                                                 },
                                                 '& br': { lineHeight: 1.6 },
-                                                // Palabras clave resaltadas con color heredado - CORREGIDO
                                                 '& .keyword-highlight': {
                                                     fontWeight: 600,
                                                     padding: '1px 4px',
@@ -456,7 +648,7 @@ const Chat = () => {
                                                     fontSize: '0.7rem'
                                                 }}
                                             >
-                                                {message.timestamp.toLocaleTimeString('es-ES', {
+                                                {convertTimestampToDate(message.timestamp).toLocaleTimeString('es-ES', {
                                                     hour: '2-digit',
                                                     minute: '2-digit'
                                                 })}
@@ -482,7 +674,6 @@ const Chat = () => {
                         </ListItem>
                     ))}
 
-                    {/* Indicador de typing */}
                     {isTyping && (
                         <ListItem sx={{ justifyContent: 'flex-start', px: 0 }}>
                             <Fade in>
@@ -514,8 +705,7 @@ const Chat = () => {
                 <div ref={messagesEndRef} />
             </Box>
 
-            {/* Sugerencias Inteligentes */}
-            {showSuggestions && (
+            {showSuggestions && !currentChatId && (
                 <Box sx={{
                     position: 'sticky',
                     bottom: '80px',
@@ -573,7 +763,6 @@ const Chat = () => {
                 </Box>
             )}
 
-            {/* Input de Mensaje */}
             <Paper
                 elevation={4}
                 sx={{
@@ -684,7 +873,6 @@ const Chat = () => {
                     </Tooltip>
                 </Box>
 
-                {/* Indicadores de estado */}
                 <Box sx={{
                     maxWidth: 900,
                     mx: 'auto',
@@ -712,7 +900,6 @@ const Chat = () => {
                 </Box>
             </Paper>
 
-            {/* Snackbar para errores */}
             <Snackbar
                 open={!!error}
                 autoHideDuration={6000}

@@ -23,7 +23,6 @@ export const LoginApp = () => {
             .then(res => {
             })
             .catch(error => {
-                console.log(error.code);
                 showInfoToast(error.code.split('/')[1].split('-').join(' '));
             })
     }
