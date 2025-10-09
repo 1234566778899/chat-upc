@@ -1,4 +1,7 @@
 import React, { useState, useRef, useEffect, useContext } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import rehypeHighlight from 'rehype-highlight';
 import {
     Box,
     Paper,
@@ -65,8 +68,7 @@ const Chat = () => {
     const [serverStatus, setServerStatus] = useState('checking');
     const [currentChatId, setCurrentChatId] = useState(null);
     const [isLoadingChat, setIsLoadingChat] = useState(false);
-
-    // Refs
+    const [currentThreadId, setCurrentThreadId] = useState(null);
     const messagesEndRef = useRef(null);
     const loadedChatIdRef = useRef(null);
     const lastNewParamRef = useRef(null);
@@ -295,25 +297,22 @@ const Chat = () => {
         try {
             const response = await fetch(`${API_BASE_URL}/pregunta`, {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ pregunta })
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    pregunta,
+                    threadId: currentThreadId,
+                }),
             });
-
             const data = await response.json();
-
-            if (!response.ok) {
-                throw new Error(data.error || 'Error en la respuesta del servidor');
+            if (!response.ok) throw new Error(data.error || "Error en la respuesta del servidor");
+            if (!data.success) throw new Error(data.error || "Error en el procesamiento de la pregunta");
+            if (!currentThreadId && data.threadId) {
+                setCurrentThreadId(data.threadId);
+                console.log("🧵 Nuevo threadId guardado:", data.threadId);
             }
-
-            if (!data.success) {
-                throw new Error(data.error || 'Error en el procesamiento de la pregunta');
-            }
-
             return data.respuesta;
         } catch (error) {
-            console.error('Error calling backend API:', error);
+            console.error("Error calling backend API:", error);
             throw error;
         }
     };
@@ -609,36 +608,28 @@ const Chat = () => {
                                             })
                                         }}
                                     >
-                                        <Box
-                                            sx={{
-                                                mb: 1,
-                                                '& p': {
-                                                    margin: '0 0 10px 0',
-                                                    lineHeight: 1.6
-                                                },
-                                                '& p:last-child': { margin: 0 },
-                                                '& div': {
-                                                    margin: '6px 0',
-                                                    lineHeight: 1.5
-                                                },
-                                                '& strong': {
-                                                    fontWeight: 600,
-                                                    color: 'inherit'
-                                                },
-                                                '& br': { lineHeight: 1.6 },
-                                                '& .keyword-highlight': {
-                                                    fontWeight: 600,
-                                                    padding: '1px 4px',
-                                                    borderRadius: '3px',
-                                                    color: 'inherit',
-                                                    backgroundColor: 'rgba(255,255,255,0.2)',
-                                                    border: '1px solid rgba(255,255,255,0.3)'
-                                                }
-                                            }}
-                                            dangerouslySetInnerHTML={{
-                                                __html: formatMessageText(message.text)
-                                            }}
-                                        />
+                                        <Box sx={{
+                                            '& pre': {
+                                                backgroundColor: '#f6f8fa',
+                                                padding: '10px',
+                                                borderRadius: '6px',
+                                                overflowX: 'auto',
+                                            },
+                                            '& code': {
+                                                backgroundColor: 'rgba(0,0,0,0.05)',
+                                                padding: '2px 4px',
+                                                borderRadius: '4px',
+                                                fontFamily: 'monospace',
+                                            },
+                                            '& h1, & h2, & h3': { marginTop: '12px', marginBottom: '8px' },
+                                            '& ul, & ol': { marginLeft: '20px', marginBottom: '10px' },
+                                        }}>
+                                            <ReactMarkdown
+                                                children={message.text}
+                                                remarkPlugins={[remarkGfm]}
+                                                rehypePlugins={[rehypeHighlight]}
+                                            />
+                                        </Box>
 
                                         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mt: 1 }}>
                                             <Typography
